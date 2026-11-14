@@ -2,6 +2,8 @@
 
 Paravec is a research reference implementation for analyzing embedding spectra, allocating scalar-quantizer bits by variance, and pruning exact flat searches with PCA-prefix lower bounds.
 
+Search and evaluation currently use squared Euclidean (L2) distance. Normalize rows before indexing if your intended metric is cosine similarity; inner-product search is not implemented.
+
 ## Install
 
 ```powershell
@@ -51,7 +53,7 @@ restored_index = PackedSpectralIndex.load("index.npz")
 result = restored_index.search(query_vector, k=10)
 ```
 
-For exact reranking, build with `store_original=True` and call `search(..., exact_rerank=True)`; retaining originals removes most of the storage savings. The analyzer now includes packed code, error-bound, allocation, and basis costs in its estimated bytes and float32/float64 ratios. These numeric estimates exclude Python object and archive overhead and are not measured recall or throughput.
+Packed queries decode at most `block_size` vectors at a time; the default adapts to dimension and limits each decoded block to four million coefficient elements. For exact reranking, build with `store_original=True` and call `search(..., exact_rerank=True)`; retaining originals removes most of the storage savings. The analyzer includes packed code, error-bound, allocation, and basis costs in estimated bytes and float32/float64 ratios. These numeric estimates exclude Python object and archive overhead and are not measured recall or throughput.
 
 ## Evaluate retrieval
 

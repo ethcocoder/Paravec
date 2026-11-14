@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from paravec.packed import pack_codes, unpack_codes
+from paravec.packed import pack_codes, unpack_codes, unpack_codes_range
 
 
 class PackedCodeTests(unittest.TestCase):
@@ -18,6 +18,7 @@ class PackedCodeTests(unittest.TestCase):
         restored = unpack_codes(packed, len(codes), bits)
 
         np.testing.assert_array_equal(restored, codes)
+        np.testing.assert_array_equal(unpack_codes_range(packed, len(codes), bits, 7, 29), codes[7:29])
         self.assertEqual(len(packed), (len(codes) * int(bits.sum()) + 7) // 8)
 
     def test_rejects_codes_outside_allocated_width(self):

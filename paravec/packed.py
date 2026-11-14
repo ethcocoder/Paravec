@@ -44,9 +44,21 @@ def pack_codes(codes, bits) -> bytes:
 
 
 def unpack_codes(data: bytes | bytearray | memoryview, vector_count: int, bits) -> np.ndarray:
+    return unpack_codes_range(data, vector_count, bits, 0, vector_count)
+
+
+def unpack_codes_range(
+    data: bytes | bytearray | memoryview,
+    vector_count: int,
+    bits,
+    start: int,
+    stop: int,
+) -> np.ndarray:
     widths = _validate_bits(bits)
     if type(vector_count) is not int or vector_count < 0:
         raise ValueError("vector_count must be a nonnegative integer")
+    if type(start) is not int or type(stop) is not int or not 0 <= start <= stop <= vector_count:
+        raise ValueError("invalid packed code range")
     if not isinstance(data, (bytes, bytearray, memoryview)):
         raise TypeError("packed codes must be bytes-like")
     total_bits = vector_count * int(widths.sum())
@@ -55,15 +67,15 @@ def unpack_codes(data: bytes | bytearray | memoryview, vector_count: int, bits) 
         raise ValueError("packed code length does not match vector count and bit widths")
 
     packed = np.frombuffer(data, dtype=np.uint8)
-    codes = np.zeros((vector_count, widths.size), dtype=np.uint16)
-    vector_offsets = np.arange(vector_count, dtype=np.uint64)
+    codes = np.zeros((stop - start, widths.size), dtype=np.uint16)
+    vector_offsets = np.arange(start, stop, dtype=np.uint64)
     offset = 0
     for mode, width_value in enumerate(widths):
         width = int(width_value)
         if width == 0:
             continue
         positions = offset + vector_offsets * width
-        values = np.zeros(vector_count, dtype=np.uint32)
+        values = np.zeros(stop - start, dtype=np.uint32)
         for bit_index in range(width):
             bit_positions = positions + bit_index
             byte_indices = (bit_positions >> 3).astype(np.intp)

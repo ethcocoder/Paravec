@@ -4,8 +4,11 @@ import numpy as np
 
 from .alloc import allocate_bits
 from .basis import SpectralBasis, fit_basis
-from .packed import pack_codes, unpack_codes
+from .packed import pack_codes, unpack_codes, unpack_codes_range
 from .quant import quantize
+
+
+MAX_QUERY_BLOCK_ELEMENTS = 4_000_000
 
 
 @dataclass(frozen=True)
@@ -222,9 +225,9 @@ class PackedSpectralIndex:
         baseline_bytes = self.vector_count * self.dimension * np.dtype(np.float64).itemsize
         return baseline_bytes / self.numeric_storage_bytes
 
-    def _decode_coefficients(self) -> np.ndarray:
-        codes = unpack_codes(self.packed_codes, self.vector_count, self.bits)
-        reconstructed = np.zeros((self.vector_count, self.dimension), dtype=np.float64)
+    def _decode_coefficients(self, start: int, stop: int) -> np.ndarray:
+        codes = unpack_codes_range(self.packed_codes, self.vector_count, self.bits, start, stop)
+        reconstructed = np.zeros((stop - start, self.dimension), dtype=np.float64)
         active = (self.bits > 0) & (self.basis.eigenvalues > 0)
         for mode in np.flatnonzero(active):
             sigma = np.sqrt(self.basis.eigenvalues[mode])
@@ -232,48 +235,109 @@ class PackedSpectralIndex:
             reconstructed[:, mode] = -3.0 * sigma + (codes[:, mode].astype(np.float64) + 0.5) * step
         return reconstructed
 
-    def search(self, query, k: int = 10, *, exact_rerank: bool = False) -> PackedSearchResult:
+    def search(
+        self,
+        query,
+        k: int = 10,
+        *,
+        exact_rerank: bool = False,
+        block_size: int | None = None,
+    ) -> PackedSearchResult:
         query_value = np.asarray(query, dtype=np.float64)
         if query_value.shape != (self.dimension,) or not np.all(np.isfinite(query_value)):
             raise ValueError("query must be a finite vector matching index dimension")
         if type(k) is not int or not 1 <= k <= self.vector_count:
             raise ValueError("k must be between 1 and the number of indexed vectors")
+        if block_size is None:
+            block_size = min(4096, max(1, MAX_QUERY_BLOCK_ELEMENTS // self.dimension))
+        elif type(block_size) is not int or block_size < 1:
+            raise ValueError("block_size must be a positive integer")
+        if block_size > 1_000_000 or block_size * self.dimension > MAX_QUERY_BLOCK_ELEMENTS:
+            raise ValueError("block_size exceeds the per-query working-memory limit")
         if exact_rerank and self.original is None:
             raise ValueError("exact_rerank requires store_original=True")
 
         query_coefficients = self.basis.transform(query_value[None, :])[0]
-        reconstructed = self._decode_coefficients()
-        differences = reconstructed - query_coefficients
-        estimated = np.einsum("ij,ij->i", differences, differences)
-        bounds = 2.0 * np.sqrt(estimated) * self.error_norm + self.error_norm**2
-        lower = np.maximum(0.0, estimated - bounds)
-        upper = estimated + bounds
-
         if exact_rerank:
-            threshold = float(np.partition(upper, k - 1)[k - 1])
-            candidates = np.flatnonzero(lower <= threshold)
-            exact_distances = np.einsum(
-                "ij,ij->i",
-                self.original[candidates] - query_value,
-                self.original[candidates] - query_value,
-            )
-            order = np.lexsort((candidates, exact_distances))[:k]
-            indices = candidates[order]
+            best_upper = np.full(k, np.inf, dtype=np.float64)
+            for start in range(0, self.vector_count, block_size):
+                stop = min(start + block_size, self.vector_count)
+                reconstructed = self._decode_coefficients(start, stop)
+                differences = reconstructed - query_coefficients
+                estimated = np.einsum("ij,ij->i", differences, differences)
+                errors = self.error_norm[start:stop]
+                bounds = 2.0 * np.sqrt(estimated) * errors + errors**2
+                upper = estimated + bounds
+                best_upper = np.partition(np.concatenate((best_upper, upper)), k - 1)[:k]
+            threshold = float(np.max(best_upper))
+
+            best_indices = np.empty(0, dtype=np.int64)
+            best_distances = np.empty(0, dtype=np.float64)
+            best_lower = np.empty(0, dtype=np.float64)
+            best_upper_bounds = np.empty(0, dtype=np.float64)
+            shortlist_size = 0
+            for start in range(0, self.vector_count, block_size):
+                stop = min(start + block_size, self.vector_count)
+                reconstructed = self._decode_coefficients(start, stop)
+                differences = reconstructed - query_coefficients
+                estimated = np.einsum("ij,ij->i", differences, differences)
+                errors = self.error_norm[start:stop]
+                bounds = 2.0 * np.sqrt(estimated) * errors + errors**2
+                lower = np.maximum(0.0, estimated - bounds)
+                upper = estimated + bounds
+                local_indices = np.flatnonzero(lower <= threshold)
+                shortlist_size += int(local_indices.size)
+                if local_indices.size == 0:
+                    continue
+                indices = local_indices.astype(np.int64) + start
+                exact_differences = self.original[indices] - query_value
+                exact_distances = np.einsum("ij,ij->i", exact_differences, exact_differences)
+                combined_indices = np.concatenate((best_indices, indices))
+                combined_distances = np.concatenate((best_distances, exact_distances))
+                combined_lower = np.concatenate((best_lower, lower[local_indices]))
+                combined_upper = np.concatenate((best_upper_bounds, upper[local_indices]))
+                order = np.lexsort((combined_indices, combined_distances))[:k]
+                best_indices = combined_indices[order]
+                best_distances = combined_distances[order]
+                best_lower = combined_lower[order]
+                best_upper_bounds = combined_upper[order]
             return PackedSearchResult(
-                indices=indices,
-                squared_distances=exact_distances[order],
-                lower_bounds=lower[indices],
-                upper_bounds=upper[indices],
-                shortlist_size=int(candidates.size),
+                indices=best_indices,
+                squared_distances=best_distances,
+                lower_bounds=best_lower,
+                upper_bounds=best_upper_bounds,
+                shortlist_size=shortlist_size,
                 exact=True,
             )
 
-        indices = np.lexsort((np.arange(self.vector_count), estimated))[:k]
+        best_indices = np.empty(0, dtype=np.int64)
+        best_distances = np.empty(0, dtype=np.float64)
+        best_lower = np.empty(0, dtype=np.float64)
+        best_upper = np.empty(0, dtype=np.float64)
+        for start in range(0, self.vector_count, block_size):
+            stop = min(start + block_size, self.vector_count)
+            reconstructed = self._decode_coefficients(start, stop)
+            differences = reconstructed - query_coefficients
+            estimated = np.einsum("ij,ij->i", differences, differences)
+            errors = self.error_norm[start:stop]
+            bounds = 2.0 * np.sqrt(estimated) * errors + errors**2
+            lower = np.maximum(0.0, estimated - bounds)
+            upper = estimated + bounds
+            indices = np.arange(start, stop, dtype=np.int64)
+            combined_indices = np.concatenate((best_indices, indices))
+            combined_distances = np.concatenate((best_distances, estimated))
+            combined_lower = np.concatenate((best_lower, lower))
+            combined_upper = np.concatenate((best_upper, upper))
+            order = np.lexsort((combined_indices, combined_distances))[:k]
+            best_indices = combined_indices[order]
+            best_distances = combined_distances[order]
+            best_lower = combined_lower[order]
+            best_upper = combined_upper[order]
         return PackedSearchResult(
-            indices=indices,
-            squared_distances=estimated[indices],
-            lower_bounds=lower[indices],
-            upper_bounds=upper[indices],
+            indices=best_indices,
+            squared_distances=best_distances,
+            lower_bounds=best_lower,
+            upper_bounds=best_upper,
             shortlist_size=int(self.vector_count),
             exact=False,
         )

@@ -55,6 +55,28 @@ class SearchTests(unittest.TestCase):
         np.testing.assert_array_equal(result.indices, expected)
         self.assertLess(result.shortlist_size, len(vectors))
 
+    def test_packed_search_is_invariant_to_decode_block_size(self):
+        rng = np.random.default_rng(31)
+        vectors = rng.normal(size=(137, 11)) * np.geomspace(2.0, 0.1, 11)
+        query = rng.normal(size=11)
+        index = PackedSpectralIndex(vectors, bit_budget_bits_per_vector=33, store_original=True)
+        expected = np.argsort(np.sum((vectors - query) ** 2, axis=1), kind="stable")[:8]
+        reference = index.search(query, k=8, exact_rerank=True, block_size=137)
+
+        for block_size in (1, 7, 32, 64):
+            with self.subTest(block_size=block_size):
+                result = index.search(query, k=8, exact_rerank=True, block_size=block_size)
+                np.testing.assert_array_equal(result.indices, expected)
+                np.testing.assert_array_equal(result.indices, reference.indices)
+                np.testing.assert_allclose(result.squared_distances, reference.squared_distances)
+
+    def test_packed_search_rejects_invalid_block_size(self):
+        index = PackedSpectralIndex(np.eye(4), bit_budget_bits_per_vector=16)
+        with self.assertRaisesRegex(ValueError, "block_size"):
+            index.search(np.zeros(4), k=2, block_size=0)
+        with self.assertRaisesRegex(ValueError, "working-memory"):
+            index.search(np.zeros(4), k=2, block_size=1_000_001)
+
     def test_packed_index_save_load_preserves_queries(self):
         rng = np.random.default_rng(17)
         vectors = rng.normal(size=(96, 10)) * np.geomspace(2.0, 0.2, 10)
