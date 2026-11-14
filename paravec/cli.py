@@ -6,6 +6,7 @@ import sys
 import numpy as np
 
 from .analyzer import analyze_spectrum
+from .evaluation import evaluate_retrieval
 from .validation import validate_dataset
 
 
@@ -23,6 +24,14 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--bit-budget", type=int, default=32)
     validate.add_argument("--seed", type=int, default=42)
     validate.add_argument("--output", type=Path, help="write the JSON report to this path")
+    evaluate = subparsers.add_parser("evaluate", help="measure held-out recall and storage estimates for packed search")
+    evaluate.add_argument("input", type=Path, help="input .npy matrix with shape (vectors, dimensions)")
+    evaluate.add_argument("--budgets", type=int, nargs="+", default=[32, 64, 128])
+    evaluate.add_argument("--queries", type=int, default=32)
+    evaluate.add_argument("--k", type=int, default=10)
+    evaluate.add_argument("--train-fraction", type=float, default=0.8)
+    evaluate.add_argument("--seed", type=int, default=42)
+    evaluate.add_argument("--output", type=Path, help="write the JSON report to this path")
     return parser
 
 
@@ -33,12 +42,21 @@ def main(argv=None) -> int:
         vectors = np.load(args.input, allow_pickle=False)
         if args.command == "analyze":
             report = analyze_spectrum(vectors, bit_budgets=args.budgets)
-        else:
+        elif args.command == "validate":
             report = validate_dataset(
                 vectors,
                 query_count=args.queries,
                 k=args.k,
                 bit_budget=args.bit_budget,
+                seed=args.seed,
+            )
+        else:
+            report = evaluate_retrieval(
+                vectors,
+                bit_budgets=args.budgets,
+                query_count=args.queries,
+                k=args.k,
+                train_fraction=args.train_fraction,
                 seed=args.seed,
             )
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"

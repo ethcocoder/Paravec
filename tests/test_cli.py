@@ -35,6 +35,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(report["status"], "passed")
         self.assertTrue(report["exact_staged_search_matches_brute_force"])
 
+    def test_evaluate_writes_recall_and_storage_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "vectors.npy"
+            output_path = Path(directory) / "evaluation.json"
+            np.save(input_path, np.random.default_rng(8).normal(size=(40, 6)))
+
+            result = main([
+                "evaluate", str(input_path), "--budgets", "16", "32",
+                "--queries", "8", "--k", "3", "--output", str(output_path),
+            ])
+            report = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(report["results"]), 2)
+        self.assertEqual(report["results"][0]["exact_rerank_recall_at_k_mean"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

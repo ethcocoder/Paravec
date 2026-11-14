@@ -53,6 +53,16 @@ result = restored_index.search(query_vector, k=10)
 
 For exact reranking, build with `store_original=True` and call `search(..., exact_rerank=True)`; retaining originals removes most of the storage savings. The analyzer now includes packed code, error-bound, allocation, and basis costs in its estimated bytes and float32/float64 ratios. These numeric estimates exclude Python object and archive overhead and are not measured recall or throughput.
 
+## Evaluate retrieval
+
+On a supplied embedding matrix, compare approximate packed recall and exact-rerank recall against brute-force float64 neighbors:
+
+```powershell
+paravec evaluate embeddings.npy --budgets 32 64 128 --queries 32 --k 10 --output evaluation.json
+```
+
+The report includes packed-only and original-backed storage estimates, mean recall@k, and rerank shortlist fraction for each budget. It uses one deterministic split; run repeated seeds and compare with scalar/PQ/OPQ baselines at equal total bytes before drawing compression-quality conclusions. No throughput benchmark is performed.
+
 ## Status and limitations
 
 This is not yet a production vector database or a demonstrated retrieval win. IVF/local bases, updates, optimized kernels, retrieval recall-vs-bytes curves, and comparisons with SQ/PQ/OPQ baselines remain unimplemented. Predicted distortion is a model estimate, not measured recall. See `docs/spec` for the original design and evaluation gates.
