@@ -18,6 +18,14 @@ paravec analyze embeddings.npy --budgets 16 32 64 --output spectrum.json
 
 The report includes eigenvalue decay, effective dimensions at 90% and 99% variance, participation ratio, per-mode bit allocations, predicted distortion, and estimated basis overhead.
 
+## Validate a dataset
+
+```powershell
+paravec validate embeddings.npy --queries 32 --k 10 --bit-budget 32 --output validation.json
+```
+
+Validation uses a deterministic holdout split and checks PCA distance isometry, exact staged-search results against brute force, and deterministic quantization-bound coverage for every held-out query/database pair. The report also includes quantized top-k recall and coefficient-read fraction as dataset-specific diagnostics. Bound coverage uses the measured source-to-reconstruction error, so it checks the deterministic bound implementation; it is not probabilistic coverage evidence or a cross-dataset benchmark.
+
 ## Reference API
 
 ```python

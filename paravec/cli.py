@@ -6,6 +6,7 @@ import sys
 import numpy as np
 
 from .analyzer import analyze_spectrum
+from .validation import validate_dataset
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -15,6 +16,13 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("input", type=Path, help="input .npy matrix with shape (vectors, dimensions)")
     analyze.add_argument("--budgets", type=int, nargs="+", default=[16, 32, 64, 128])
     analyze.add_argument("--output", type=Path, help="write the JSON report to this path")
+    validate = subparsers.add_parser("validate", help="validate spectral bounds and staged search on a NumPy matrix")
+    validate.add_argument("input", type=Path, help="input .npy matrix with shape (vectors, dimensions)")
+    validate.add_argument("--queries", type=int, default=32)
+    validate.add_argument("--k", type=int, default=10)
+    validate.add_argument("--bit-budget", type=int, default=32)
+    validate.add_argument("--seed", type=int, default=42)
+    validate.add_argument("--output", type=Path, help="write the JSON report to this path")
     return parser
 
 
@@ -23,12 +31,23 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         vectors = np.load(args.input, allow_pickle=False)
-        report = analyze_spectrum(vectors, bit_budgets=args.budgets)
+        if args.command == "analyze":
+            report = analyze_spectrum(vectors, bit_budgets=args.budgets)
+        else:
+            report = validate_dataset(
+                vectors,
+                query_count=args.queries,
+                k=args.k,
+                bit_budget=args.bit_budget,
+                seed=args.seed,
+            )
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
         if args.output:
             args.output.write_text(rendered, encoding="utf-8")
         else:
             sys.stdout.write(rendered)
+        if args.command == "validate" and report["status"] != "passed":
+            return 1
     except (OSError, ValueError, TypeError) as error:
         parser.error(str(error))
     return 0
