@@ -27,11 +27,26 @@ def analyze_spectrum(vectors, bit_budgets=(16, 32, 64, 128)) -> dict:
             })
             continue
         bits = allocate_bits(eigenvalues, budget)
+        packed_code_bytes = (values.shape[0] * budget + 7) // 8
+        quantization_bound_bytes = values.shape[0] * np.dtype(np.float64).itemsize
+        allocation_bytes = bits.nbytes
+        packed_index_bytes = (
+            packed_code_bytes + quantization_bound_bytes + basis_bytes + allocation_bytes
+        )
+        float32_baseline_bytes = values.shape[0] * values.shape[1] * np.dtype(np.float32).itemsize
+        float64_baseline_bytes = values.shape[0] * values.shape[1] * np.dtype(np.float64).itemsize
         allocations.append({
             "budget_bits_per_vector": int(budget),
             "feasible": True,
             "estimated_bytes_per_vector": float(budget) / 8.0,
             "basis_bytes_per_vector": float(basis_bytes) / values.shape[0],
+            "packed_code_bytes": int(packed_code_bytes),
+            "error_bound_bytes": int(quantization_bound_bytes),
+            "allocation_metadata_bytes": int(allocation_bytes),
+            "estimated_packed_index_bytes": int(packed_index_bytes),
+            "estimated_index_bytes_per_vector": float(packed_index_bytes) / values.shape[0],
+            "estimated_compression_ratio_vs_float32": float(float32_baseline_bytes / packed_index_bytes),
+            "estimated_compression_ratio_vs_float64": float(float64_baseline_bytes / packed_index_bytes),
             "predicted_distortion": predicted_distortion(eigenvalues, bits),
             "bits_by_mode": bits.tolist(),
         })

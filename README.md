@@ -36,11 +36,26 @@ result = index.search(query_vector, k=10, stages=[16, 64, database_vectors.shape
 print(result.indices, result.squared_distances)
 ```
 
-The flat index keeps exact spectral coefficients and returns exact top-k results. Its PCA-prefix bounds are lossless, but this reference path does not compress the stored search coefficients. The scalar quantizer is a separate prototype; its deterministic distance bound uses each vector's measured coefficient reconstruction error.
+`SpectralIndex` keeps exact spectral coefficients and returns exact top-k results using lossless PCA-prefix pruning. `PackedSpectralIndex` applies the scalar quantizer to the stored coefficients; its per-vector distance intervals use measured coefficient reconstruction error.
+
+## Packed index
+
+`PackedSpectralIndex` stores variance-allocated codes in a mode-major variable-bit stream and keeps a per-vector quantization-error norm. It supports approximate lookup with distance intervals, or exact reranking when original vectors are retained:
+
+```python
+from paravec import PackedSpectralIndex
+
+index = PackedSpectralIndex(database_vectors, bit_budget_bits_per_vector=64)
+index.save("index.npz")
+restored_index = PackedSpectralIndex.load("index.npz")
+result = restored_index.search(query_vector, k=10)
+```
+
+For exact reranking, build with `store_original=True` and call `search(..., exact_rerank=True)`; retaining originals removes most of the storage savings. The analyzer now includes packed code, error-bound, allocation, and basis costs in its estimated bytes and float32/float64 ratios. These numeric estimates exclude Python object and archive overhead and are not measured recall or throughput.
 
 ## Status and limitations
 
-This is not yet a production vector database or a demonstrated compression win. IVF/local bases, packed storage, approximate quantized search, retrieval recall-vs-bytes curves, and comparisons with SQ/PQ/OPQ baselines remain unimplemented. Predicted distortion is a model estimate, not measured recall. See `docs/spec` for the original design and evaluation gates.
+This is not yet a production vector database or a demonstrated retrieval win. IVF/local bases, updates, optimized kernels, retrieval recall-vs-bytes curves, and comparisons with SQ/PQ/OPQ baselines remain unimplemented. Predicted distortion is a model estimate, not measured recall. See `docs/spec` for the original design and evaluation gates.
 
 Run the test suite with:
 

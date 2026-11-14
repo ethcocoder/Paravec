@@ -2,7 +2,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .basis import fit_basis
+from .alloc import allocate_bits
+from .basis import SpectralBasis, fit_basis
+from .packed import pack_codes, unpack_codes
+from .quant import quantize
 
 
 @dataclass(frozen=True)
@@ -12,6 +15,16 @@ class SearchResult:
     coefficient_reads: int
     total_coefficient_reads: int
     survivors_by_stage: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PackedSearchResult:
+    indices: np.ndarray
+    squared_distances: np.ndarray
+    lower_bounds: np.ndarray
+    upper_bounds: np.ndarray
+    shortlist_size: int
+    exact: bool
 
 
 class SpectralIndex:
@@ -85,4 +98,182 @@ class SpectralIndex:
             coefficient_reads=int(coefficient_reads),
             total_coefficient_reads=int(self.vector_count * self.dimension),
             survivors_by_stage=tuple(survivors),
+        )
+
+
+class PackedSpectralIndex:
+    """Bit-packed scalar codes with conservative bounds and optional exact reranking."""
+
+    def __init__(self, vectors, bit_budget_bits_per_vector: int = 64, max_bits: int = 8, store_original: bool = False):
+        values = np.asarray(vectors, dtype=np.float64)
+        if values.ndim != 2 or not np.all(np.isfinite(values)):
+            raise ValueError("vectors must be a two-dimensional finite array")
+        if values.shape[0] == 0 or values.shape[1] == 0:
+            raise ValueError("vectors must not be empty")
+        self.basis = fit_basis(values)
+        coefficients = self.basis.transform(values)
+        self.bits = allocate_bits(self.basis.eigenvalues, bit_budget_bits_per_vector, max_bits)
+        quantized = quantize(coefficients, self.basis.eigenvalues, self.bits)
+        self.packed_codes = pack_codes(quantized.codes, self.bits)
+        self.error_norm = quantized.error_norm.astype(np.float64, copy=True)
+        self.vector_count, self.dimension = values.shape
+        self.store_original = bool(store_original)
+        self.original = values.copy() if self.store_original else None
+        self.bit_budget_bits_per_vector = int(bit_budget_bits_per_vector)
+        self.bits_per_vector = int(self.bits.sum())
+        self._update_storage_stats()
+
+    def _update_storage_stats(self) -> None:
+        self.numeric_storage_bytes = (
+            len(self.packed_codes)
+            + self.error_norm.nbytes
+            + self.basis.mean.nbytes
+            + self.basis.components.nbytes
+            + self.basis.eigenvalues.nbytes
+            + self.bits.nbytes
+        )
+        if self.original is not None:
+            self.numeric_storage_bytes += self.original.nbytes
+
+    def save(self, path) -> None:
+        np.savez_compressed(
+            path,
+            format_version=np.asarray(1, dtype=np.uint16),
+            vector_count=np.asarray(self.vector_count, dtype=np.int64),
+            dimension=np.asarray(self.dimension, dtype=np.int64),
+            bit_budget_bits_per_vector=np.asarray(self.bit_budget_bits_per_vector, dtype=np.int64),
+            has_original=np.asarray(self.original is not None, dtype=np.bool_),
+            mean=self.basis.mean,
+            components=self.basis.components,
+            eigenvalues=self.basis.eigenvalues,
+            bits=self.bits,
+            packed_codes=np.frombuffer(self.packed_codes, dtype=np.uint8),
+            error_norm=self.error_norm,
+            original=self.original if self.original is not None else np.empty((0, self.dimension)),
+        )
+
+    @classmethod
+    def load(cls, path) -> "PackedSpectralIndex":
+        with np.load(path, allow_pickle=False) as archive:
+            required = {
+                "format_version", "vector_count", "dimension", "bit_budget_bits_per_vector",
+                "has_original", "mean", "components", "eigenvalues", "bits", "packed_codes",
+                "error_norm", "original",
+            }
+            if not required.issubset(archive.files):
+                raise ValueError("packed index is missing required fields")
+            if int(archive["format_version"]) != 1:
+                raise ValueError("unsupported packed index format version")
+            vector_count = int(archive["vector_count"])
+            dimension = int(archive["dimension"])
+            budget = int(archive["bit_budget_bits_per_vector"])
+            has_original = bool(archive["has_original"])
+            mean = np.array(archive["mean"], dtype=np.float64, copy=True)
+            components = np.array(archive["components"], dtype=np.float64, copy=True)
+            eigenvalues = np.array(archive["eigenvalues"], dtype=np.float64, copy=True)
+            bits = np.array(archive["bits"], copy=True)
+            packed_codes = np.array(archive["packed_codes"], dtype=np.uint8, copy=True).tobytes()
+            error_norm = np.array(archive["error_norm"], dtype=np.float64, copy=True)
+            original = np.array(archive["original"], dtype=np.float64, copy=True)
+
+        if vector_count < 1 or dimension < 1 or budget < 0:
+            raise ValueError("invalid packed index dimensions or bit budget")
+        if mean.shape != (dimension,) or components.shape != (dimension, dimension):
+            raise ValueError("packed index basis shape does not match dimension")
+        if eigenvalues.shape != (dimension,) or not np.all(np.isfinite(eigenvalues)) or np.any(eigenvalues < 0):
+            raise ValueError("packed index eigenvalues are invalid")
+        if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(components)):
+            raise ValueError("packed index basis contains non-finite values")
+        if not np.allclose(components.T @ components, np.eye(dimension), rtol=1e-6, atol=1e-6):
+            raise ValueError("packed index components are not orthonormal")
+        if bits.shape != (dimension,) or not np.issubdtype(bits.dtype, np.integer):
+            raise ValueError("packed index bit allocation is invalid")
+        if np.any(bits < 0) or np.any(bits > 16) or int(bits.sum()) > budget:
+            raise ValueError("packed index bit allocation exceeds its declared budget")
+        if error_norm.shape != (vector_count,) or not np.all(np.isfinite(error_norm)) or np.any(error_norm < 0):
+            raise ValueError("packed index error norms are invalid")
+        if has_original:
+            if original.shape != (vector_count, dimension) or not np.all(np.isfinite(original)):
+                raise ValueError("packed index original vectors are invalid")
+        elif original.size != 0:
+            raise ValueError("packed index unexpectedly contains original vectors")
+        unpack_codes(packed_codes, vector_count, bits)
+
+        instance = cls.__new__(cls)
+        instance.basis = SpectralBasis(mean, components, eigenvalues)
+        instance.bits = bits.astype(np.int16, copy=False)
+        instance.packed_codes = packed_codes
+        instance.error_norm = error_norm
+        instance.vector_count = vector_count
+        instance.dimension = dimension
+        instance.store_original = has_original
+        instance.original = original if has_original else None
+        instance.bit_budget_bits_per_vector = budget
+        instance.bits_per_vector = int(instance.bits.sum())
+        instance._update_storage_stats()
+        return instance
+
+    @property
+    def bytes_per_vector(self) -> float:
+        return self.numeric_storage_bytes / self.vector_count
+
+    @property
+    def compression_ratio(self) -> float:
+        baseline_bytes = self.vector_count * self.dimension * np.dtype(np.float64).itemsize
+        return baseline_bytes / self.numeric_storage_bytes
+
+    def _decode_coefficients(self) -> np.ndarray:
+        codes = unpack_codes(self.packed_codes, self.vector_count, self.bits)
+        reconstructed = np.zeros((self.vector_count, self.dimension), dtype=np.float64)
+        active = (self.bits > 0) & (self.basis.eigenvalues > 0)
+        for mode in np.flatnonzero(active):
+            sigma = np.sqrt(self.basis.eigenvalues[mode])
+            step = 6.0 * sigma / (1 << int(self.bits[mode]))
+            reconstructed[:, mode] = -3.0 * sigma + (codes[:, mode].astype(np.float64) + 0.5) * step
+        return reconstructed
+
+    def search(self, query, k: int = 10, *, exact_rerank: bool = False) -> PackedSearchResult:
+        query_value = np.asarray(query, dtype=np.float64)
+        if query_value.shape != (self.dimension,) or not np.all(np.isfinite(query_value)):
+            raise ValueError("query must be a finite vector matching index dimension")
+        if type(k) is not int or not 1 <= k <= self.vector_count:
+            raise ValueError("k must be between 1 and the number of indexed vectors")
+        if exact_rerank and self.original is None:
+            raise ValueError("exact_rerank requires store_original=True")
+
+        query_coefficients = self.basis.transform(query_value[None, :])[0]
+        reconstructed = self._decode_coefficients()
+        differences = reconstructed - query_coefficients
+        estimated = np.einsum("ij,ij->i", differences, differences)
+        bounds = 2.0 * np.sqrt(estimated) * self.error_norm + self.error_norm**2
+        lower = np.maximum(0.0, estimated - bounds)
+        upper = estimated + bounds
+
+        if exact_rerank:
+            threshold = float(np.partition(upper, k - 1)[k - 1])
+            candidates = np.flatnonzero(lower <= threshold)
+            exact_distances = np.einsum(
+                "ij,ij->i",
+                self.original[candidates] - query_value,
+                self.original[candidates] - query_value,
+            )
+            order = np.lexsort((candidates, exact_distances))[:k]
+            indices = candidates[order]
+            return PackedSearchResult(
+                indices=indices,
+                squared_distances=exact_distances[order],
+                lower_bounds=lower[indices],
+                upper_bounds=upper[indices],
+                shortlist_size=int(candidates.size),
+                exact=True,
+            )
+
+        indices = np.lexsort((np.arange(self.vector_count), estimated))[:k]
+        return PackedSearchResult(
+            indices=indices,
+            squared_distances=estimated[indices],
+            lower_bounds=lower[indices],
+            upper_bounds=upper[indices],
+            shortlist_size=int(self.vector_count),
+            exact=False,
         )

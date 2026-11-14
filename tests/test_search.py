@@ -1,8 +1,10 @@
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
 
-from paravec.search import SpectralIndex
+from paravec.search import PackedSpectralIndex, SpectralIndex
 
 
 class SearchTests(unittest.TestCase):
@@ -25,6 +27,50 @@ class SearchTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             index.search(np.zeros(4), stages=[2, 3])
+
+    def test_packed_index_reports_bounds_and_uses_less_numeric_memory(self):
+        rng = np.random.default_rng(42)
+        vectors = rng.normal(size=(256, 16)) * np.geomspace(3.0, 0.2, 16)
+        query = rng.normal(size=16)
+        index = PackedSpectralIndex(vectors, bit_budget_bits_per_vector=64)
+
+        result = index.search(query, k=10)
+        exact_distances = np.sum((vectors - query) ** 2, axis=1)
+
+        self.assertFalse(result.exact)
+        self.assertGreater(index.compression_ratio, 1.0)
+        self.assertTrue(np.all(result.lower_bounds <= exact_distances[result.indices]))
+        self.assertTrue(np.all(exact_distances[result.indices] <= result.upper_bounds + 1e-10))
+
+    def test_packed_exact_rerank_matches_brute_force(self):
+        rng = np.random.default_rng(23)
+        vectors = rng.normal(size=(128, 12)) * np.geomspace(2.0, 0.1, 12)
+        query = rng.normal(size=12)
+        index = PackedSpectralIndex(vectors, bit_budget_bits_per_vector=48, store_original=True)
+
+        result = index.search(query, k=7, exact_rerank=True)
+        expected = np.argsort(np.sum((vectors - query) ** 2, axis=1), kind="stable")[:7]
+
+        self.assertTrue(result.exact)
+        np.testing.assert_array_equal(result.indices, expected)
+        self.assertLess(result.shortlist_size, len(vectors))
+
+    def test_packed_index_save_load_preserves_queries(self):
+        rng = np.random.default_rng(17)
+        vectors = rng.normal(size=(96, 10)) * np.geomspace(2.0, 0.2, 10)
+        query = rng.normal(size=10)
+        index = PackedSpectralIndex(vectors, bit_budget_bits_per_vector=40, store_original=True)
+        before = index.search(query, k=6, exact_rerank=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "index.npz"
+            index.save(path)
+            loaded = PackedSpectralIndex.load(path)
+            after = loaded.search(query, k=6, exact_rerank=True)
+
+        np.testing.assert_array_equal(after.indices, before.indices)
+        np.testing.assert_allclose(after.squared_distances, before.squared_distances)
+        self.assertEqual(loaded.numeric_storage_bytes, index.numeric_storage_bytes)
 
 
 if __name__ == "__main__":
