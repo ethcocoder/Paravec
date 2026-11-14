@@ -22,6 +22,10 @@ class EvaluationTests(unittest.TestCase):
         for result in report["results"]:
             self.assertTrue(result["feasible"])
             self.assertEqual(result["exact_rerank_recall_at_k_mean"], 1.0)
+            scalar = result["uniform_scalar"]
+            self.assertTrue(scalar["feasible"])
+            self.assertEqual(result["uniform_scalar"]["exact_rerank_recall_at_k_mean"], 1.0)
+            self.assertEqual(scalar["code_bytes_mean"], result["code_bytes_mean"])
             self.assertGreater(result["packed_numeric_storage_bytes_mean"], 0)
             self.assertGreater(result["rerank_bytes_per_vector_mean"], result["packed_bytes_per_vector_mean"])
 

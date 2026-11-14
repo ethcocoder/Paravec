@@ -61,11 +61,11 @@ On a supplied embedding matrix, compare approximate packed recall and exact-rera
 paravec evaluate embeddings.npy --budgets 32 64 128 --queries 32 --k 10 --repeats 3 --output evaluation.json
 ```
 
-The report includes packed-only and original-backed storage estimates, mean recall@k and standard deviation across seeds, and rerank shortlist fraction for each budget. Repeats use deterministic seeds beginning at `42` by default. Compare with scalar/PQ/OPQ baselines at equal total bytes across the same splits before drawing compression-quality conclusions. No throughput benchmark is performed.
+The report compares variance-allocated spectral quantization with uniform original-space scalar quantization at the same nominal code-bit budget. The scalar ranges are fit on each training database split. Results include packed-only and original-backed storage estimates, mean recall@k and standard deviation across seeds, and rerank shortlist fraction for each budget. Repeats use deterministic seeds beginning at `42` by default. Metadata overhead means actual bytes differ even though code bytes are equal; compare against PQ/OPQ at equal total bytes before drawing compression-quality conclusions. No throughput benchmark is performed.
 
 ## Status and limitations
 
-This is not yet a production vector database or a demonstrated retrieval win. IVF/local bases, updates, optimized kernels, retrieval recall-vs-bytes curves, and comparisons with SQ/PQ/OPQ baselines remain unimplemented. Predicted distortion is a model estimate, not measured recall. See `docs/spec` for the original design and evaluation gates.
+This is not yet a production vector database or a demonstrated retrieval win. IVF/local bases, updates, optimized kernels, equal-total-byte PQ/OPQ baselines, and multi-dataset recall-vs-bytes studies remain unimplemented. Predicted distortion is a model estimate, not measured recall. See `docs/spec` for the original design and evaluation gates.
 
 Run the test suite with:
 
