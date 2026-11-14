@@ -43,11 +43,12 @@ class CliTests(unittest.TestCase):
 
             result = main([
                 "evaluate", str(input_path), "--budgets", "16", "32",
-                "--queries", "8", "--k", "3", "--output", str(output_path),
+                "--queries", "8", "--k", "3", "--repeats", "2", "--output", str(output_path),
             ])
             report = json.loads(output_path.read_text(encoding="utf-8"))
 
         self.assertEqual(result, 0)
+        self.assertEqual(report["repeats"], 2)
         self.assertEqual(len(report["results"]), 2)
         self.assertEqual(report["results"][0]["exact_rerank_recall_at_k_mean"], 1.0)
 

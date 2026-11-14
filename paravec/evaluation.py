@@ -15,6 +15,7 @@ def evaluate_retrieval(
     query_count: int = 32,
     k: int = 10,
     train_fraction: float = 0.8,
+    repeats: int = 1,
     seed: int = 42,
 ) -> dict:
     values = np.asarray(vectors, dtype=np.float64)
@@ -26,6 +27,8 @@ def evaluate_retrieval(
         raise ValueError("query_count must be a positive integer")
     if type(k) is not int or k < 1:
         raise ValueError("k must be a positive integer")
+    if type(repeats) is not int or not 1 <= repeats <= 20:
+        raise ValueError("repeats must be between 1 and 20")
     if not math.isfinite(train_fraction) or not 0.5 <= train_fraction < 1.0:
         raise ValueError("train_fraction must be between 0.5 inclusive and 1 exclusive")
     if type(seed) is not int:
@@ -47,66 +50,100 @@ def evaluate_retrieval(
         raise ValueError("query_count exceeds the vectors left after the database split")
     if k > database_count:
         raise ValueError("k cannot exceed the database size")
-    if database_count * query_count * values.shape[1] * len(budgets) > MAX_EVALUATION_PAIRS:
+    if database_count * query_count * values.shape[1] * len(budgets) * repeats > MAX_EVALUATION_PAIRS:
         raise ValueError("evaluation exceeds the work limit; reduce data size, query_count, or dimensions")
 
-    permutation = np.random.default_rng(seed).permutation(values.shape[0])
-    database = values[permutation[:database_count]]
-    queries = values[permutation[database_count:database_count + query_count]]
-    exact_neighbors = []
-    for query in queries:
-        distances = np.einsum("ij,ij->i", database - query, database - query)
-        exact_neighbors.append(np.lexsort((np.arange(database_count), distances))[:k])
+    records_by_budget = [[] for _ in budgets]
+    for repeat_index in range(repeats):
+        repeat_seed = seed + repeat_index
+        permutation = np.random.default_rng(repeat_seed).permutation(values.shape[0])
+        database = values[permutation[:database_count]]
+        queries = values[permutation[database_count:database_count + query_count]]
+        exact_neighbors = []
+        for query in queries:
+            distances = np.einsum("ij,ij->i", database - query, database - query)
+            exact_neighbors.append(np.lexsort((np.arange(database_count), distances))[:k])
+
+        for budget_index, budget in enumerate(budgets):
+            try:
+                index = PackedSpectralIndex(
+                    database,
+                    bit_budget_bits_per_vector=budget,
+                    store_original=True,
+                )
+            except ValueError as error:
+                records_by_budget[budget_index].append({
+                    "seed": repeat_seed,
+                    "feasible": False,
+                    "reason": str(error),
+                })
+                continue
+
+            approximate_recalls = []
+            reranked_recalls = []
+            shortlist_fractions = []
+            for query, expected in zip(queries, exact_neighbors):
+                approximate = index.search(query, k=k)
+                reranked = index.search(query, k=k, exact_rerank=True)
+                expected_set = set(expected.tolist())
+                approximate_recalls.append(
+                    len(expected_set.intersection(approximate.indices.tolist())) / k
+                )
+                reranked_recalls.append(
+                    len(expected_set.intersection(reranked.indices.tolist())) / k
+                )
+                shortlist_fractions.append(reranked.shortlist_size / database_count)
+
+            packed_storage_bytes = index.numeric_storage_bytes - database.nbytes
+            raw_float32_bytes = database_count * values.shape[1] * np.dtype(np.float32).itemsize
+            raw_float64_bytes = database_count * values.shape[1] * np.dtype(np.float64).itemsize
+            records_by_budget[budget_index].append({
+                "seed": repeat_seed,
+                "feasible": True,
+                "allocated_bits_per_vector": index.bits_per_vector,
+                "code_bytes": len(index.packed_codes),
+                "packed_numeric_storage_bytes": int(packed_storage_bytes),
+                "packed_bytes_per_vector": float(packed_storage_bytes / database_count),
+                "rerank_storage_bytes": int(index.numeric_storage_bytes),
+                "rerank_bytes_per_vector": float(index.numeric_storage_bytes / database_count),
+                "compression_ratio_vs_float32_packed_only": float(raw_float32_bytes / packed_storage_bytes),
+                "compression_ratio_vs_float64_packed_only": float(raw_float64_bytes / packed_storage_bytes),
+                "approximate_recall_at_k_mean": float(np.mean(approximate_recalls)),
+                "approximate_recall_at_k_min": float(np.min(approximate_recalls)),
+                "exact_rerank_recall_at_k_mean": float(np.mean(reranked_recalls)),
+                "exact_rerank_recall_at_k_min": float(np.min(reranked_recalls)),
+                "mean_rerank_shortlist_fraction": float(np.mean(shortlist_fractions)),
+            })
 
     budget_results = []
-    for budget in budgets:
-        try:
-            index = PackedSpectralIndex(
-                database,
-                bit_budget_bits_per_vector=budget,
-                store_original=True,
-            )
-        except ValueError as error:
+    for budget, records in zip(budgets, records_by_budget):
+        infeasible = next((record for record in records if not record["feasible"]), None)
+        if infeasible is not None:
             budget_results.append({
                 "bit_budget_bits_per_vector": budget,
                 "feasible": False,
-                "reason": str(error),
+                "reason": infeasible["reason"],
+                "runs": records,
             })
             continue
-
-        approximate_recalls = []
-        reranked_recalls = []
-        shortlist_fractions = []
-        for query, expected in zip(queries, exact_neighbors):
-            approximate = index.search(query, k=k)
-            reranked = index.search(query, k=k, exact_rerank=True)
-            expected_set = set(expected.tolist())
-            approximate_recalls.append(
-                len(expected_set.intersection(approximate.indices.tolist())) / k
-            )
-            reranked_recalls.append(
-                len(expected_set.intersection(reranked.indices.tolist())) / k
-            )
-            shortlist_fractions.append(reranked.shortlist_size / database_count)
-
-        packed_storage_bytes = index.numeric_storage_bytes - database.nbytes
-        raw_float32_bytes = database_count * values.shape[1] * np.dtype(np.float32).itemsize
-        raw_float64_bytes = database_count * values.shape[1] * np.dtype(np.float64).itemsize
+        approximate_means = [record["approximate_recall_at_k_mean"] for record in records]
+        reranked_means = [record["exact_rerank_recall_at_k_mean"] for record in records]
         budget_results.append({
             "bit_budget_bits_per_vector": budget,
             "feasible": True,
-            "allocated_bits_per_vector": index.bits_per_vector,
-            "code_bytes": len(index.packed_codes),
-            "packed_numeric_storage_bytes": int(packed_storage_bytes),
-            "packed_bytes_per_vector": float(packed_storage_bytes / database_count),
-            "rerank_storage_bytes": int(index.numeric_storage_bytes),
-            "rerank_bytes_per_vector": float(index.numeric_storage_bytes / database_count),
-            "compression_ratio_vs_float32_packed_only": float(raw_float32_bytes / packed_storage_bytes),
-            "compression_ratio_vs_float64_packed_only": float(raw_float64_bytes / packed_storage_bytes),
-            "approximate_recall_at_k_mean": float(np.mean(approximate_recalls)),
-            "exact_rerank_recall_at_k_mean": float(np.mean(reranked_recalls)),
-            "exact_rerank_recall_at_k_min": float(np.min(reranked_recalls)),
-            "mean_rerank_shortlist_fraction": float(np.mean(shortlist_fractions)),
+            "allocated_bits_per_vector_mean": float(np.mean([record["allocated_bits_per_vector"] for record in records])),
+            "packed_numeric_storage_bytes_mean": float(np.mean([record["packed_numeric_storage_bytes"] for record in records])),
+            "packed_bytes_per_vector_mean": float(np.mean([record["packed_bytes_per_vector"] for record in records])),
+            "rerank_bytes_per_vector_mean": float(np.mean([record["rerank_bytes_per_vector"] for record in records])),
+            "compression_ratio_vs_float32_packed_only_mean": float(np.mean([record["compression_ratio_vs_float32_packed_only"] for record in records])),
+            "compression_ratio_vs_float64_packed_only_mean": float(np.mean([record["compression_ratio_vs_float64_packed_only"] for record in records])),
+            "approximate_recall_at_k_mean": float(np.mean(approximate_means)),
+            "approximate_recall_at_k_std_across_seeds": float(np.std(approximate_means)),
+            "approximate_recall_at_k_min": float(np.min([record["approximate_recall_at_k_min"] for record in records])),
+            "exact_rerank_recall_at_k_mean": float(np.mean(reranked_means)),
+            "exact_rerank_recall_at_k_min": float(np.min([record["exact_rerank_recall_at_k_min"] for record in records])),
+            "mean_rerank_shortlist_fraction": float(np.mean([record["mean_rerank_shortlist_fraction"] for record in records])),
+            "runs": records,
         })
 
     return {
@@ -120,10 +157,12 @@ def evaluate_retrieval(
         "k": k,
         "train_fraction": train_fraction,
         "seed": seed,
+        "repeats": repeats,
+        "seeds": [seed + repeat_index for repeat_index in range(repeats)],
         "baselines": ["exact float64 brute-force neighbors"],
         "results": budget_results,
         "limitations": [
-            "This single seeded split is a dataset diagnostic, not a statistically powered benchmark.",
+            "Repeated seeded splits show sensitivity to sampled database/query partitions but are not a substitute for independent datasets or a powered benchmark.",
             "Compression ratios include packed codes, error norms, basis, and allocation metadata but exclude Python and archive overhead.",
             "Rerank storage includes original float64 database vectors; exact reranking therefore does not represent packed-only memory.",
             "No SQ/PQ/OPQ or optimized-kernel baseline is included, and no throughput claim is made.",

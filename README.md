@@ -58,10 +58,10 @@ For exact reranking, build with `store_original=True` and call `search(..., exac
 On a supplied embedding matrix, compare approximate packed recall and exact-rerank recall against brute-force float64 neighbors:
 
 ```powershell
-paravec evaluate embeddings.npy --budgets 32 64 128 --queries 32 --k 10 --output evaluation.json
+paravec evaluate embeddings.npy --budgets 32 64 128 --queries 32 --k 10 --repeats 3 --output evaluation.json
 ```
 
-The report includes packed-only and original-backed storage estimates, mean recall@k, and rerank shortlist fraction for each budget. It uses one deterministic split; run repeated seeds and compare with scalar/PQ/OPQ baselines at equal total bytes before drawing compression-quality conclusions. No throughput benchmark is performed.
+The report includes packed-only and original-backed storage estimates, mean recall@k and standard deviation across seeds, and rerank shortlist fraction for each budget. Repeats use deterministic seeds beginning at `42` by default. Compare with scalar/PQ/OPQ baselines at equal total bytes across the same splits before drawing compression-quality conclusions. No throughput benchmark is performed.
 
 ## Status and limitations
 

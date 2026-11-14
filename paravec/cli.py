@@ -30,6 +30,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--queries", type=int, default=32)
     evaluate.add_argument("--k", type=int, default=10)
     evaluate.add_argument("--train-fraction", type=float, default=0.8)
+    evaluate.add_argument("--repeats", type=int, default=1)
     evaluate.add_argument("--seed", type=int, default=42)
     evaluate.add_argument("--output", type=Path, help="write the JSON report to this path")
     return parser
@@ -57,6 +58,7 @@ def main(argv=None) -> int:
                 query_count=args.queries,
                 k=args.k,
                 train_fraction=args.train_fraction,
+                repeats=args.repeats,
                 seed=args.seed,
             )
         rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
